@@ -48,7 +48,7 @@ public:
     /**
      * @brief Sets the maximum retry delay.
      * @param max_retry_delay The maximum time to wait to retry a
-     * synchronization (seconds). 
+     * failed synchronization (seconds). 
      */
     void set_max_retry_delay(uint32_t max_retry_delay);
 
