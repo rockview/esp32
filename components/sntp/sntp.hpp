@@ -53,6 +53,14 @@ public:
     void set_max_retry_delay(uint32_t max_retry_delay);
 
     /**
+     * @brief Sets the maximum synchronization error.
+     * @param max_sync_error The maximum allowable synchronization error
+     * (milliseconds). This is equal to half the difference between the times of
+     * the outbound and inbound legs of the server synchronization.
+     */
+    void set_max_sync_error(uint32_t max_sync_error);
+
+    /**
      * @brief Client callback function prototype.
      * @param now The NTP-synchronized time.
      * @param offset The time offset computed by the time synchronization process for
@@ -117,6 +125,7 @@ private:
     uint32_t m_poll_interval;   // Normal: interval between syncs
     uint32_t m_retry_delay;     // Error: delay before next retry
     uint32_t m_max_retry_delay; // The maximum retry delay before trying another server
+    double m_max_sync_delta;    // The maximum difference between the outbound and return legs of roundtrip
 
     std::string m_server_name;  // Hostname of current server
 	ip_addr m_server_addr;      // IP address of current server

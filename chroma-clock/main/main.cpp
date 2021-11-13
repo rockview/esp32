@@ -122,6 +122,7 @@ static void init_cfg() {
       //cfg->set("poll-interval", 12*3600); // 12 hours
       //cfg->set("poll-interval", 24*3600); // 24 hours
       cfg->set("max-retry-delay", 10*60); // 10 minutes
+      cfg->set("max-sync-error", 5);   // Milliseconds
       cfg->set("timezone", "MST+7");
       cfg->set("date-format", 2);   // 1: European, 2: American, 3: ISO
       cfg->set("temp-unit", 2);     // 1: Centigrade, 2: Farenheit
@@ -157,7 +158,7 @@ static void init_rtc() {
    ESP_ERROR_CHECK(rtc->write_register(RTC::STATUS_REG, RTC::STATUS_EN32KHZ));
 
    // Set aging offset
-   ESP_ERROR_CHECK(rtc->write_register(RTC::AGING_REG, uint8_t(-30)));
+   // ESP_ERROR_CHECK(rtc->write_register(RTC::AGING_REG, uint8_t(-38)));
    ESP_ERROR_CHECK(rtc->force_temp_conv());
 
    // Log aging offset
@@ -345,13 +346,15 @@ static std::shared_ptr<SNTP> new_sntp()
    ESP_ERROR_CHECK(cfg->get("ntp-server", server_name));
    sntp->set_ntp_server(server_name);
 
-   uint32_t poll_interval;
-   ESP_ERROR_CHECK(cfg->get("poll-interval", &poll_interval));
-   sntp->set_poll_interval(poll_interval);
+   uint32_t value;
+   ESP_ERROR_CHECK(cfg->get("poll-interval", &value));
+   sntp->set_poll_interval(value);
 
-   uint32_t max_retry_delay;
-	ESP_ERROR_CHECK(cfg->get("max-retry-delay", &max_retry_delay));
-   sntp->set_max_retry_delay(max_retry_delay);
+	ESP_ERROR_CHECK(cfg->get("max-retry-delay", &value));
+   sntp->set_max_retry_delay(value);
+
+ 	ESP_ERROR_CHECK(cfg->get("max-sync-error", &value));
+   sntp->set_max_sync_error(value);
 
    sntp->set_sync_cb(sync_cb, nullptr);
    ESP_ERROR_CHECK(sntp->start());

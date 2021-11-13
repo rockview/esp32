@@ -16,20 +16,22 @@ static const char *TAG = "SNTP";
 using namespace jhall;
 
 // Not all NTP timeservers perform equally well. The main problem appears to be
-// asymmetric delays for the out and back legs of the packet exchange with the
+// asymmetric delays for the out and return legs of the packet exchange with the
 // server. I implemented a simple heuristic to somewhat mitigate this issue but
-// it's not an easy problem to solve with SNTP. The heuristic rejects all server
-// roundtrips that exceed 100ms and forces a retry. That seems to work well in
-// central Arizona but may not be optimal for other locations. A general
-// observation is that the nearer the server, the better the performance,
-// presumably because it involves fewer network hops that can bog down. A good
-// NTP server can synchronize a client to within +/- 5ms. It is tempting to pick
-// a server that performs well and stick with it, but that doesn't seem
-// reasonable for an application that is expected to run for years unattended. A
-// better approach is to pick a DNS name that maps to a pool of time servers
-// that are resolved by DNS lookup on a round-robin basis. If the current server
-// fails, and retries do not resolve the issue, another DNS lookup will yield a
-// new server to try.
+// it's not an easy problem to solve with SNTP. The heuristic rejects
+// synchronizations with the server where the difference of the times of the out
+// and return legs exceed a fixed amount (default 10ms) and forces a retry. The
+// maximum synchronization error is then half of the time difference (default
+// 5ms). That seems to work well in central Arizona but may not be optimal for
+// other locations that may be forced to retry the synchronizations excessively.
+// A general observation is that the nearer the server, the better the
+// performance, presumably because it involves fewer network hops that can bog
+// down. It is tempting to pick a server that performs well and stick with it,
+// but that doesn't seem reasonable for an application that is expected to run
+// for years unattended. A better approach is to pick a DNS name that maps to a
+// pool of time servers that are resolved by DNS lookup on a round-robin basis.
+// If the current server fails, and retries do not resolve the issue, another
+// DNS lookup will yield a new server to try.
 //
 // The synchronization code is very careful to check for network errors and
 // performs all the packet and message validation checks described in RFC 4330
@@ -71,17 +73,16 @@ struct __attribute__((__packed__)) SNTP::ntp_msg {
 #define NTP_PORT 123
 #define NTP_SYNC_TIMEOUT	(5*1000)	// Server timeout (5 seconds)
 
-#define MIN_NTP_RETRY_DELAY	15	// secs (RFC 4330)
+#define MIN_NTP_RETRY_DELAY	15	// Minimum time to retry a sychronization (seconds) (RFC 4330)
 #define NTP_SECOND (1ULL<<32)	// Value of one second in an NTP timestamp
 
 #define DEFAULT_SERVER_NAME		"time.apple.com"
 #define DEFAULT_POLL_INTERVAL	(1*3600)	// 1 hour
 #define DEFAULT_MAX_RETRY_DELAY	(10*60)		// 10 minutes
+#define DEFAULT_MAX_SYNC_ERROR	5	// Milliseconds
 
 // Seconds from unix epoch (1970/01/01T00:00:00Z) to NTP era 1 (2036/02/07T06:28:16Z)
 #define SECS_FROM_UNIX_EPOCH_TO_NTP_ERA_1 (2085978496L)
-
-#define MAX_ROUNDTRIP_DELAY	0.100	// secs
 
 SNTP::SNTP()
 	: m_sync_cb(nullptr)
@@ -90,11 +91,10 @@ SNTP::SNTP()
 	, m_sync_delay(0)
 	, m_poll_interval(DEFAULT_POLL_INTERVAL)
 	, m_max_retry_delay(DEFAULT_MAX_RETRY_DELAY)
+	, m_max_sync_delta(0.002*DEFAULT_MAX_SYNC_ERROR)
 	, m_server_name(DEFAULT_SERVER_NAME)
 {
 	static_assert(NTP_MSG_LEN == (4 + 11*4), "invalid size: struct ntp_msg");
-
-
 	next_server();
 }
 
@@ -120,6 +120,11 @@ void SNTP::set_poll_interval(uint32_t poll_interval)
 void SNTP::set_max_retry_delay(uint32_t max_retry_delay)
 {
 	m_max_retry_delay = max_retry_delay;
+}
+
+void SNTP::set_max_sync_error(uint32_t max_sync_error)
+{
+	m_max_sync_delta = 0.002*max_sync_error;
 }
 
 void SNTP::set_sync_cb(sync_cb_t cb, void *arg) 
@@ -378,19 +383,19 @@ esp_err_t SNTP::process_reply(const struct ntp_msg &msg) const
 		ntp_t t1 = make_ntp_time(ntohl(msg.originate_timestamp[0]), ntohl(msg.originate_timestamp[1]));
 		ntp_t t2 = make_ntp_time(ntohl(msg.receive_timestamp[0]), ntohl(msg.receive_timestamp[1]));
 
-		t = ((t2 - t1) + (t3 - t4))/2;
-		d = (t4 - t1) - (t3 - t2);
+		double out = double(t2 - t1)/NTP_SECOND;	// Outbound leg to the server
+		double ret = double(t4 - t3)/NTP_SECOND;	// Return leg from the server
+		double delta = std::abs(out - ret);
+		ESP_LOGI(TAG, "out=%.3fs, ret=%.3fs, delta=%.3fs, max=%.3fs", out, ret, delta, m_max_sync_delta);
 
-		double r = double(d)/NTP_SECOND;
-		if (std::abs(r) > MAX_ROUNDTRIP_DELAY) {
-			// Sometimes an NTP servers take hundreds of milliseconds longer
-			// than usual to respond. When this happens the offset calculation
-			// often seems to be erroneous (probably due to asymmetric packet
-			// delay). Thus, I ignore syncs that have a long roundtrip times and
-			// force a retry
-			ESP_LOGE(TAG, "roundtrip too long: %.3fs", r);
+		if (delta > m_max_sync_delta) {
+			// Sync delta exceeded; retry
+			ESP_LOGE(TAG, "max sync delta (%.3f) exceeded: %.3fs", m_max_sync_delta, delta);
 			return ESP_FAIL;
 		}
+
+		t = ((t2 - t1) + (t3 - t4))/2;
+		d = (t4 - t1) - (t3 - t2);
 
 		sync = t4 + t;
 	} else {
@@ -547,16 +552,17 @@ void SNTP::log_sync_info(ntp_t t4, ntp_t sync, ntp_t t, ntp_t d) const
 #endif // LOG_LOCAL_LEVEL >= ESP_LOG_DEBUG
 
 #if 0
-double out = double(t2 - t1)/NTP_SECOND;
-double ret = double(t4 - t3)/NTP_SECOND;
-ESP_LOGI(TAG, "out=%.3fs, ret=%.3fs", out, ret);
-
-if (std::abs(out - ret)/std::min(out, ret) > 0.50) {
-	// When the outbound and return legs of an NTP request are
-	// asymmetric the offset calculation is untrustworthy. The cause of
-	// this seems to be a network delay, especially on the return path.
-	// Thus, ignore asymmetric requests and force a retry
-	ESP_LOGE(TAG, "NTP request asymmetry: out=%.3fs, ret=%.3f, retrying", out, ret);
-	return ESP_FAIL;
-}
+// This was the orginal heuristic I used to mitigate sync errors. It worked
+// reasonably well but could result in a synchronization error of up to 30-40
+// milliseconds.
+		double r = double(d)/NTP_SECOND;
+		if (std::abs(r) > MAX_ROUNDTRIP_DELAY) {
+			// Sometimes an NTP servers take hundreds of milliseconds longer
+			// than usual to respond. When this happens the offset calculation
+			// often seems to be erroneous (probably due to asymmetric packet
+			// delay). Thus, I ignore syncs that have a long roundtrip times and
+			// force a retry
+			ESP_LOGE(TAG, "roundtrip too long: %.3fs", r);
+			return ESP_FAIL;
+		}
 #endif
